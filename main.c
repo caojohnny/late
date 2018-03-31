@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <xcb/xcb.h>
+#include <xcb/xtest.h>
 #include <stdlib.h>
 
 #define L_CTRL 37
@@ -14,6 +15,8 @@
 #define DISABLED 0
 #define HOLD 1
 #define CLICK 2
+
+#define PAUSE_ITER 500
 
 const uint32_t enterEventMask[] = {XCB_EVENT_MASK_FOCUS_CHANGE};
 const uint32_t eventMasks[] = {XCB_EVENT_MASK_FOCUS_CHANGE | XCB_EVENT_MASK_KEY_PRESS | XCB_EVENT_MASK_KEY_RELEASE};
@@ -54,6 +57,9 @@ void refocus(xcb_connection_t *connection, xcb_window_t *previousWindow, xcb_win
 }
 
 int cleanup(xcb_connection_t *connection) {
+    xcb_void_cookie_t cookie = xcb_test_fake_input(connection, XCB_BUTTON_RELEASE, XCB_BUTTON_INDEX_1, XCB_CURRENT_TIME, XCB_NONE, 0, 0, 0);
+    xcb_request_check(connection, cookie);
+
     xcb_disconnect(connection);
 
     return 0;
@@ -62,7 +68,7 @@ int cleanup(xcb_connection_t *connection) {
 int main() {
     xcb_connection_t *connection = xcb_connect(NULL, NULL);
     if (xcb_connection_has_error(connection)) {
-        fprintf(stderr, "Failed to connect to display");
+        fprintf(stderr, "Failed to connect to display\n");
         return 1;
     }
 
@@ -77,11 +83,10 @@ int main() {
     if (focusReply == NULL) {
         return 1;
     }
-    
+
     xcb_window_t window = XCB_NONE;
     refocus(connection, &window, focusReply->focus);
     openWindow(connection, focusReply->focus);
-    printf("Currently focused window: %d\n", window);
 
     free(focusReply);
 
@@ -89,10 +94,34 @@ int main() {
     int lShiftPressed = FALSE;
     int mode = DISABLED;
     while (1) {
+        if (mode == CLICK) {
+            uint8_t state = XCB_BUTTON_PRESS;
+            while (1) {
+                xcb_query_pointer_cookie_t pointerCookie = xcb_query_pointer(connection, window);
+                xcb_query_pointer_reply_t *pointerReply = xcb_query_pointer_reply(connection,
+                                                                                  pointerCookie, NULL);
+                xcb_void_cookie_t cookie = xcb_test_fake_input(connection, state, XCB_BUTTON_INDEX_1, XCB_CURRENT_TIME, window, pointerReply->root_x, pointerReply->root_y, 0);
+                xcb_request_check(connection, cookie);
+                state = state == XCB_BUTTON_PRESS ? XCB_BUTTON_RELEASE : XCB_BUTTON_PRESS;
+
+                xcb_generic_event_t *queuedEvent = NULL;
+                for (int i = 0; i < PAUSE_ITER; i++) {
+                    queuedEvent = xcb_poll_for_queued_event(connection);
+                    if (queuedEvent != NULL) {
+                        break;
+                    }
+                }
+
+                if (queuedEvent != NULL) {
+                    break;
+                }
+            }
+        }
+
         xcb_generic_event_t *event = xcb_wait_for_event(connection);
         if (event == NULL) {
             if (xcb_connection_has_error(connection)) {
-                fprintf(stderr, "IO Error occurred fetching event");
+                fprintf(stderr, "IO Error occurred fetching event\n");
             }
             continue;
         }
@@ -100,11 +129,11 @@ int main() {
         switch (event->response_type & ~0x80) {
             case XCB_FOCUS_IN: {
                 xcb_focus_in_event_t *focusInEvent = (xcb_focus_in_event_t *) event;
-                printf("Lose focus to %d\n", window);
                 refocus(connection, &window, focusInEvent->event);
-                printf("Focus caught by %d\n", window);
+                printf("Focus %d\n", window);
                 break;
-            } case XCB_KEY_PRESS: {
+            }
+            case XCB_KEY_PRESS: {
                 xcb_key_press_event_t *pressEvent = (xcb_key_press_event_t *) event;
                 xcb_keycode_t keycode = pressEvent->detail;
 
@@ -118,10 +147,20 @@ int main() {
                     case Z:
                         if (lCtrlPressed && lShiftPressed) {
                             if (mode == DISABLED) {
+                                printf("Toggled to HOLD mode\n");
+                                xcb_query_pointer_cookie_t pointerCookie = xcb_query_pointer(connection, window);
+                                xcb_query_pointer_reply_t *pointerReply = xcb_query_pointer_reply(connection,
+                                                                                                  pointerCookie, NULL);
+
+                                xcb_void_cookie_t cookie = xcb_test_fake_input(connection, XCB_BUTTON_PRESS, XCB_BUTTON_INDEX_1, XCB_CURRENT_TIME, window, pointerReply->root_x, pointerReply->root_y, 0);
+                                xcb_request_check(connection, cookie);
+                                free(pointerReply);
                                 mode = HOLD;
                             } else if (mode == HOLD) {
+                                printf("Toggled to CLICK mode\n");
                                 mode = CLICK;
                             } else {
+                                printf("Toggled to DISABLED mode\n");
                                 mode = DISABLED;
                             }
                         }
@@ -136,7 +175,8 @@ int main() {
                         break;
                 }
                 break;
-            } case XCB_KEY_RELEASE: {
+            }
+            case XCB_KEY_RELEASE: {
                 xcb_key_press_event_t *pressEvent = (xcb_key_press_event_t *) event;
                 xcb_keycode_t keycode = pressEvent->detail;
                 switch (keycode) {
@@ -149,7 +189,9 @@ int main() {
                     default:
                         break;
                 }
-            } default:
+                break;
+            }
+            default:
                 break;
         }
 
