@@ -30,4 +30,5 @@ make
 # Credits
 
 Built with [CLion](https://www.jetbrains.com/clion/)
+
 [jebbs/simulated](https://github.com/Jebbs/simulated/blob/master/src/simulated/linux/mouseimpl.d)
